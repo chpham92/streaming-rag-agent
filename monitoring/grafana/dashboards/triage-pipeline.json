@@ -1,0 +1,81 @@
+{
+  "title": "Streaming Triage Pipeline",
+  "uid": "triage-pipeline",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Agent up",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "up{job=\"triage-agent\"}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Kafka consumer lag (triage-agent)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "sum(kafka_consumergroup_lag{consumergroup=\"triage-agent\"})", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "title": "Tickets failed (last 5m)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(increase(triage_tickets_failed_total[5m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "red", "value": 1 }
+      ] } } }
+    },
+    {
+      "id": 4,
+      "title": "Repeat contacts (last 5m)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "sum(increase(triage_repeat_contacts_total[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "title": "Tickets processed by priority",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{ "expr": "sum(rate(triage_tickets_processed_total[5m])) by (priority)", "legendFormat": "{{priority}}", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Tickets processed by category",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [{ "expr": "sum(rate(triage_tickets_processed_total[5m])) by (category)", "legendFormat": "{{category}}", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "title": "Triage latency (p50 / p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(triage_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(triage_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Failures by error type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{ "expr": "sum(rate(triage_tickets_failed_total[5m])) by (error_type)", "legendFormat": "{{error_type}}", "refId": "A" }]
+    }
+  ]
+}

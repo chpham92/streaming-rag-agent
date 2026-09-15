@@ -21,8 +21,27 @@ from anthropic import Anthropic
 from confluent_kafka import Consumer
 from openai import OpenAI
 from pinecone import Pinecone
+from prometheus_client import Counter, Histogram, start_http_server
 
 from models import TriageDecision
+
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "9200"))
+
+# Labels kept low-cardinality on purpose (category/priority are closed sets
+# from TriageDecision's own field descriptions) — Prometheus is a bad fit
+# for anything with unbounded label values like ticket_id or customer_id.
+TICKETS_PROCESSED = Counter(
+    "triage_tickets_processed_total", "Tickets successfully triaged", ["category", "priority"]
+)
+TICKETS_FAILED = Counter(
+    "triage_tickets_failed_total", "Tickets that errored during triage", ["error_type"]
+)
+TRIAGE_DURATION = Histogram(
+    "triage_duration_seconds", "Time spent per ticket in retrieval + Claude triage call"
+)
+REPEAT_CONTACTS = Counter(
+    "triage_repeat_contacts_total", "Tickets flagged as a repeat contact within the window"
+)
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 SOURCE_TOPIC = os.environ.get("SOURCE_TOPIC", "tickets.indexed")
@@ -122,6 +141,9 @@ def triage(anthropic_client, ticket: dict, similar: list[dict], repeat_contact: 
 
 
 def main():
+    start_http_server(METRICS_PORT)
+    print(f"metrics exposed on :{METRICS_PORT}/metrics")
+
     pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
     pinecone_index = pc.Index(PINECONE_INDEX)
     openai_client = OpenAI()
@@ -156,11 +178,15 @@ def main():
 
             history = recent_by_customer[ticket["customer_id"]]
             repeat_contact = check_repeat_contact(history, time.time())
+            if repeat_contact:
+                REPEAT_CONTACTS.inc()
 
             try:
-                similar = find_similar(pinecone_index, openai_client, ticket, ticket_id)
-                decision = triage(anthropic_client, ticket, similar, repeat_contact)
+                with TRIAGE_DURATION.time():
+                    similar = find_similar(pinecone_index, openai_client, ticket, ticket_id)
+                    decision = triage(anthropic_client, ticket, similar, repeat_contact)
             except Exception as exc:
+                TICKETS_FAILED.labels(error_type=type(exc).__name__).inc()
                 # A malformed model output or a transient API error on one
                 # ticket must not take down the whole consumer — this crashed
                 # the process outright the first time it happened (a
@@ -175,6 +201,7 @@ def main():
                 }))
                 continue
 
+            TICKETS_PROCESSED.labels(category=decision.category, priority=decision.priority).inc()
             print(json.dumps({
                 "ticket_id": ticket_id,
                 "customer_id": ticket["customer_id"],

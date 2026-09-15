@@ -18,15 +18,19 @@ producer (synthetic tickets)
         -> Spark Structured Streaming (stream_indexer.py)
             -> chunk -> OpenAI embeddings -> Pinecone upsert
             -> Kafka topic: tickets.indexed
-                -> triage-agent (triage_agent.py)
-                    -> Pinecone query (RAG: similar past tickets)
-                    -> Claude tool call -> structured TriageDecision
+                -> triage-agent (triage_agent.py)  --/metrics--> Prometheus -> Alertmanager -> alert-receiver
+                    -> Pinecone query (RAG: similar past tickets)      ^                              (logs the alert)
+                    -> Claude tool call -> structured TriageDecision   |
+                                                          kafka-exporter (consumer lag)
+                                                                        |
+                                                                    Grafana (dashboards)
 ```
 
 Everything runs locally via Docker Compose — real Apache Kafka (KRaft mode,
-no ZooKeeper) and real PySpark, no cloud cost to demo it. See `DEPLOY_GKE.md`-style
-notes below if you want to push this to a real cluster later (not built yet
-for this project — ask before assuming it exists).
+no ZooKeeper), real PySpark, and a real Prometheus/Alertmanager/Grafana stack,
+no cloud cost to demo any of it. See `DEPLOY_GKE.md`-style notes below if you
+want to push this to a real cluster later (not built yet for this project —
+ask before assuming it exists).
 
 ## Running it
 
@@ -49,6 +53,29 @@ docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 **Stop it when you're not actively using it** — the producer emits a new
 ticket every 10s by default, and each one costs a real (small) OpenAI
 embedding call plus a real Claude call: `docker compose down`.
+
+## Observability
+
+- **Grafana** — http://localhost:3000 (anonymous admin access, local-only
+  demo box): the "Streaming Triage Pipeline" dashboard — agent up/down,
+  Kafka consumer lag, tickets processed by priority/category, triage
+  latency p50/p95, failures by error type.
+- **Prometheus** — http://localhost:9090 — `triage-agent` exposes
+  `/metrics` directly (`triage_tickets_processed_total`,
+  `triage_tickets_failed_total`, `triage_duration_seconds`,
+  `triage_repeat_contacts_total`); `kafka-exporter` exposes
+  `kafka_consumergroup_lag` per consumer group/topic/partition.
+- **Alertmanager** — http://localhost:9093 — three rules in
+  `monitoring/prometheus/alerts.yml`: `TriageAgentDown` (scrape target
+  unreachable 30s+), `TriageTicketFailures` (any failure in the last 2m —
+  intentionally sensitive for a demo; a real deployment would tune this to
+  something like 3+ in 10m), `TriageConsumerLagHigh` (agent falling behind
+  the stream). Routed to `alert-receiver`, a minimal stand-in for a real
+  destination (PagerDuty/Slack) that logs the full firing → resolved
+  lifecycle — verified live: stopped `triage-agent`, watched
+  `TriageAgentDown` go `pending` → `firing`, confirmed the receiver logged
+  it, restarted the container, confirmed the `resolved` notification also
+  arrived.
 
 ## Design notes / real bugs hit building this
 
@@ -74,6 +101,16 @@ embedding call plus a real Claude call: `docker compose down`.
   in `triage_agent.py`) is in-process and resets on restart — fine for one
   replica, would need to move to something shared (Redis) before running
   more than one.
+- **Prometheus's default 1-minute rule-group evaluation interval, not a
+  bug but a real "why hasn't this fired yet" moment**: `for: 30s` on
+  `TriageAgentDown` doesn't mean it fires 30s after the target goes down —
+  it means the condition has to hold across evaluations spanning 30s, and
+  with the default 60s evaluation interval that's actually ~60-90s in
+  practice (breach detected at evaluation N, `pending` recorded, still
+  `pending` at N+1 if that's under 30s since `activeAt`, `firing` at N+2).
+  Watched `lastEvaluation` sit on the same timestamp for a full minute
+  before realizing it just hadn't run again yet, not that anything was
+  stuck.
 
 ## Tests
 

@@ -1,0 +1,33 @@
+groups:
+  - name: triage-pipeline
+    rules:
+      - alert: TriageAgentDown
+        expr: up{job="triage-agent"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "triage-agent metrics endpoint unreachable"
+          description: "Prometheus has not been able to scrape triage-agent for 30s — the consumer may be down or crash-looping."
+
+      # `for: 0s` (fires on the first evaluation) is deliberate for a
+      # portfolio demo: a real deployment would tune this to something like
+      # `increase(...[10m]) > 3` to avoid paging on a single flaky ticket,
+      # but a rule that never fires during a demo doesn't prove anything.
+      - alert: TriageTicketFailures
+        expr: increase(triage_tickets_failed_total[2m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "triage-agent failed to process a ticket"
+          description: "{{ $value }} ticket(s) failed triage in the last 2 minutes — check triage-agent logs for the error_type."
+
+      - alert: TriageConsumerLagHigh
+        expr: kafka_consumergroup_lag{consumergroup="triage-agent"} > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "triage-agent falling behind on tickets.indexed"
+          description: "Consumer lag for group triage-agent is {{ $value }} and has stayed above 5 for a minute — the agent isn't keeping up with the stream."
