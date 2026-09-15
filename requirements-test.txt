@@ -1,0 +1,12 @@
+# Union of every service's requirements.txt, plus pytest. Tests only exercise
+# pure functions (chunking, ticket generation, Pydantic validation, the
+# repeat-contact window) and never call a live API — but importing
+# triage_agent.py and generate_tickets.py at module scope still pulls in
+# their real clients (confluent-kafka, openai, pinecone, anthropic), so
+# those have to be installed for collection to succeed even though no test
+# calls out over the network.
+pytest>=8.3.0
+confluent-kafka>=2.5.0
+openai>=1.40.0
+pinecone>=5.0.0
+anthropic>=0.39.0

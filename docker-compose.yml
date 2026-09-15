@@ -1,0 +1,91 @@
+# KRaft mode (no ZooKeeper) — single broker, single node, intentionally
+# minimal for local dev. Real Apache Kafka, not a wire-compatible substitute:
+# credibility with this exact JD requirement matters more here than the
+# operational conveniences a substitute would offer.
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9094
+      # Two advertised listeners: PLAINTEXT for other containers on the
+      # compose network (reach it as `kafka:9092`), PLAINTEXT_HOST for
+      # anything running directly on the Mac (reach it as `localhost:9094`).
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false" # topics are created explicitly by kafka-init — see its command
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic tickets.raw --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic tickets.indexed --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+      "
+
+  producer:
+    build: ./producer
+    container_name: ticket-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      TOPIC: tickets.raw
+      EVENTS_PER_MINUTE: "6"
+
+  spark-indexer:
+    build: ./pipeline
+    container_name: spark-indexer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      SOURCE_TOPIC: tickets.raw
+      SINK_TOPIC: tickets.indexed
+      PINECONE_INDEX: support-tickets
+      # Real secrets pulled from the shell's environment, never hardcoded —
+      # same pattern as fitness-agent's k8s/secret.example.yaml. Run with
+      # `OPENAI_API_KEY=... PINECONE_API_KEY=... docker compose up` or export
+      # them first; docker compose reads them from the host shell here.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in your shell before starting this service}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:?set PINECONE_API_KEY in your shell before starting this service}
+
+  triage-agent:
+    build: ./agent
+    container_name: triage-agent
+    # Belt-and-suspenders with the per-message try/except in triage_agent.py:
+    # that handles a bad decision on one ticket, this handles anything that
+    # try/except doesn't (a Kafka client crash, an OOM) by restarting the
+    # process rather than leaving the consumer group silently dead.
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      SOURCE_TOPIC: tickets.indexed
+      PINECONE_INDEX: support-tickets
+      TRIAGE_AGENT_MODEL: claude-opus-5
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in your shell before starting this service}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:?set PINECONE_API_KEY in your shell before starting this service}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in your shell before starting this service}
